@@ -7,14 +7,53 @@
 //   payload    2*length    bytes
 //   crc        2 symbols   crc8([length, ...payload])
 
+export interface Profile {
+  label: string;
+  baseFreq: number; // Hz, frequency of tone 0
+  spacing: number; // Hz between adjacent tones
+}
+
 export const PROFILES = {
   ultrasonic: { label: 'Near-ultrasonic (18.0–19.5 kHz)', baseFreq: 18000, spacing: 100 },
   audible: { label: 'Audible (1.0–2.5 kHz, for testing)', baseFreq: 1000, spacing: 100 },
-};
+} satisfies Record<string, Profile>;
+
+export type ProfileKey = keyof typeof PROFILES;
+
+export function isProfileKey(key: string): key is ProfileKey {
+  return Object.hasOwn(PROFILES, key);
+}
+
+export interface ModemConfig {
+  profile: ProfileKey;
+  sampleRate: number;
+  freqs: number[];
+  hop: number; // samples per analysis hop
+  symbolLen: number; // samples per symbol
+  windowLen: number; // samples per analysis window
+  transitionLen: number; // samples of glide between symbols / fade in-out
+}
+
+export interface DecodedMessage {
+  ok: boolean; // payload CRC matched
+  bytes: Uint8Array;
+  text: string;
+  confidence: number; // mean tone ratio of the winning tones, 0..1
+}
+
+export type DecoderState =
+  | { state: 'search' }
+  | { state: 'frame'; received: number; total: number | null };
+
+export interface DecoderOptions {
+  threshold?: number;
+  onMessage?: (msg: DecodedMessage) => void;
+  onState?: (state: DecoderState) => void;
+}
 
 export const TONES = 16;
 export const MAX_PAYLOAD = 255;
-const PREAMBLE = [0, 15, 0, 15];
+const PREAMBLE: readonly number[] = [0, 15, 0, 15];
 const HOP_SECONDS = 0.01; // analysis step
 const SYMBOL_HOPS = 8; // symbol = 80 ms
 const WINDOW_SECONDS = 0.05; // analysis window, centered in the symbol
@@ -22,9 +61,9 @@ const TRANSITION_SECONDS = 0.01; // frequency glide between symbols / fade in-ou
 const HEADER_SALT = 0xa5;
 const HISTORY = 8192; // hops of tone history kept (> longest frame)
 
-export function createConfig(profileKey, sampleRate) {
-  const profile = PROFILES[profileKey];
-  if (!profile) throw new Error(`Unknown profile "${profileKey}"`);
+export function createConfig(profileKey: string, sampleRate: number): ModemConfig {
+  if (!isProfileKey(profileKey)) throw new Error(`Unknown profile "${profileKey}"`);
+  const profile: Profile = PROFILES[profileKey];
   const freqs = Array.from({ length: TONES }, (_, k) => profile.baseFreq + k * profile.spacing);
   if (freqs[TONES - 1] + profile.spacing >= sampleRate / 2) {
     throw new Error(`Sample rate ${sampleRate} Hz is too low for the ${profileKey} profile`);
@@ -43,7 +82,7 @@ export function createConfig(profileKey, sampleRate) {
   };
 }
 
-export function crc8(bytes) {
+export function crc8(bytes: Iterable<number>): number {
   let crc = 0;
   for (const b of bytes) {
     crc ^= b;
@@ -52,27 +91,28 @@ export function crc8(bytes) {
   return crc;
 }
 
-export function encodeFrame(payload) {
+export function encodeFrame(payload: ArrayLike<number>): number[] {
   if (payload.length > MAX_PAYLOAD) throw new Error(`Payload too long (max ${MAX_PAYLOAD} bytes)`);
   const symbols = [...PREAMBLE];
-  const push = (b) => symbols.push(b >> 4, b & 15);
+  const push = (b: number) => symbols.push(b >> 4, b & 15);
   const len = payload.length;
   push(len);
   push(crc8([HEADER_SALT, len]));
-  for (const b of payload) push(b);
-  push(crc8([len, ...payload]));
+  const bytes = Array.from(payload);
+  for (const b of bytes) push(b);
+  push(crc8([len, ...bytes]));
   return symbols;
 }
 
-export function frameSeconds(payloadLength) {
+export function frameSeconds(payloadLength: number): number {
   return (PREAMBLE.length + 4 + 2 * payloadLength + 2) * SYMBOL_HOPS * HOP_SECONDS;
 }
 
-const smooth = (u) => 0.5 - 0.5 * Math.cos(Math.PI * u);
+const smooth = (u: number): number => 0.5 - 0.5 * Math.cos(Math.PI * u);
 
 // Render symbols to PCM. Phase is continuous and amplitude constant (except a short
 // fade at frame start/end), so there are no clicks that could be heard.
-export function synthesize(symbols, cfg, amplitude = 0.5) {
+export function synthesize(symbols: readonly number[], cfg: ModemConfig, amplitude = 0.5): Float32Array<ArrayBuffer> {
   const { sampleRate, symbolLen: N, transitionLen: R, freqs } = cfg;
   const total = symbols.length * N;
   const out = new Float32Array(total);
@@ -102,7 +142,27 @@ export function synthesize(symbols, cfg, amplitude = 0.5) {
 // Streaming decoder. Feed it mono Float32 samples with push(); it calls
 // onMessage({ ok, bytes, text, confidence }) for every frame it finds.
 export class Decoder {
-  constructor(cfg, { threshold = 0.4, onMessage, onState } = {}) {
+  readonly cfg: ModemConfig;
+  threshold: number;
+  onMessage: DecoderOptions['onMessage'];
+  onState: DecoderOptions['onState'];
+  state: 'search' | 'frame' = 'search';
+
+  private readonly window: Float32Array;
+  private readonly coeffs: number[];
+  private readonly scratch: Float32Array;
+  private readonly ratios: Float32Array; // HISTORY × TONES, normalized tone energies
+  private readonly levels: Float32Array; // HISTORY, mean power per hop
+  private buf: Float32Array; // samples [bufStart, bufStart + bufLen)
+  private bufStart = 0;
+  private bufLen = 0;
+  private nextHop = 0; // next hop index to analyze
+  private scanH = 0; // next hop to test for a preamble while searching
+  private lockH = -1; // hop of the last preamble symbol when locked
+  private frameLen = -1; // payload length once the header checks out
+  private lastProgress = -1;
+
+  constructor(cfg: ModemConfig, { threshold = 0.4, onMessage, onState }: DecoderOptions = {}) {
     this.cfg = cfg;
     this.threshold = threshold;
     this.onMessage = onMessage;
@@ -118,7 +178,7 @@ export class Decoder {
     this.reset();
   }
 
-  reset() {
+  reset(): void {
     this.bufStart = 0;
     this.bufLen = 0;
     this.nextHop = 0;
@@ -127,16 +187,16 @@ export class Decoder {
   }
 
   // Tone energy distribution (sums to 1) of the most recent analysis window.
-  get latestRatios() {
+  get latestRatios(): Float32Array {
     const h = Math.max(0, this.nextHop - 1) % HISTORY;
     return this.ratios.subarray(h * TONES, (h + 1) * TONES);
   }
 
-  get latestLevel() {
+  get latestLevel(): number {
     return this.levels[Math.max(0, this.nextHop - 1) % HISTORY];
   }
 
-  push(chunk) {
+  push(chunk: Float32Array): void {
     this.#append(chunk);
     const { hop, windowLen } = this.cfg;
     while (this.nextHop * hop + windowLen <= this.bufStart + this.bufLen) {
@@ -146,7 +206,7 @@ export class Decoder {
     }
   }
 
-  #append(chunk) {
+  #append(chunk: Float32Array): void {
     if (this.bufLen + chunk.length > this.buf.length) {
       const drop = this.nextHop * this.cfg.hop - this.bufStart;
       if (drop > 0) {
@@ -164,7 +224,7 @@ export class Decoder {
     this.bufLen += chunk.length;
   }
 
-  #analyze(offset, h) {
+  #analyze(offset: number, h: number): void {
     const { windowLen: W } = this.cfg;
     const x = this.scratch;
     for (let i = 0; i < W; i++) x[i] = this.buf[offset + i] * this.window[i];
@@ -188,18 +248,18 @@ export class Decoder {
     this.levels[h % HISTORY] = total / (W * W);
   }
 
-  #ratio(h, k) {
+  #ratio(h: number, k: number): number {
     return this.ratios[(h % HISTORY) * TONES + k];
   }
 
-  #symbol(h) {
+  #symbol(h: number): { sym: number; conf: number } {
     let best = 0;
     for (let k = 1; k < TONES; k++) if (this.#ratio(h, k) > this.#ratio(h, best)) best = k;
     return { sym: best, conf: this.#ratio(h, best) };
   }
 
   // How well the hops ending at h match the preamble (min tone ratio across its symbols).
-  #score(h) {
+  #score(h: number): number {
     const span = (PREAMBLE.length - 1) * SYMBOL_HOPS;
     if (h - span < 0 || h >= this.nextHop) return 0;
     let min = 1;
@@ -209,7 +269,7 @@ export class Decoder {
     return min;
   }
 
-  #unlock(scanFrom) {
+  #unlock(scanFrom: number): void {
     const wasLocked = this.state === 'frame';
     this.state = 'search';
     this.scanH = scanFrom;
@@ -219,7 +279,7 @@ export class Decoder {
     if (wasLocked) this.onState?.({ state: 'search' });
   }
 
-  #process() {
+  #process(): void {
     const latest = this.nextHop - 1;
     for (;;) {
       if (this.state === 'search') {
@@ -237,8 +297,8 @@ export class Decoder {
       }
 
       // Locked on a preamble: data symbol i is centered at hop lockH + 8*(i+1).
-      const read = (i) => this.#symbol(this.lockH + SYMBOL_HOPS * (i + 1));
-      const byteAt = (i) => {
+      const read = (i: number) => this.#symbol(this.lockH + SYMBOL_HOPS * (i + 1));
+      const byteAt = (i: number) => {
         const hi = read(i);
         const lo = read(i + 1);
         return { value: (hi.sym << 4) | lo.sym, conf: hi.conf + lo.conf };

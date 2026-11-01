@@ -1,20 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createConfig, encodeFrame, synthesize, Decoder, crc8 } from '../src/modem.js';
+import { createConfig, encodeFrame, synthesize, Decoder, crc8, type DecodedMessage, type ModemConfig } from '../src/modem.ts';
 
 // Deterministic PRNG so failures are reproducible.
-function rng(seed) {
+function rng(seed: number): () => number {
   return () => {
     seed = (seed * 1664525 + 1013904223) >>> 0;
     return seed / 2 ** 32;
   };
 }
 
-function gaussian(rand) {
+function gaussian(rand: () => number): number {
   return Math.sqrt(-2 * Math.log(rand() + 1e-12)) * Math.cos(2 * Math.PI * rand());
 }
 
-function resample(input, fromRate, toRate) {
+function resample(input: Float32Array, fromRate: number, toRate: number): Float32Array {
   const out = new Float32Array(Math.floor((input.length * toRate) / fromRate));
   for (let i = 0; i < out.length; i++) {
     const t = (i * fromRate) / toRate;
@@ -26,7 +26,19 @@ function resample(input, fromRate, toRate) {
 }
 
 // Simulate the acoustic channel: leading silence, attenuation, echo, noise, low-frequency hum.
-function channel(signal, sampleRate, { seed = 1, gain = 0.1, noise = 0.01, echo = 0.4, leadSeconds = 0.537 } = {}) {
+interface ChannelOptions {
+  seed?: number;
+  gain?: number;
+  noise?: number;
+  echo?: number;
+  leadSeconds?: number;
+}
+
+function channel(
+  signal: Float32Array,
+  sampleRate: number,
+  { seed = 1, gain = 0.1, noise = 0.01, echo = 0.4, leadSeconds = 0.537 }: ChannelOptions = {},
+): Float32Array {
   const rand = rng(seed);
   const lead = Math.round(leadSeconds * sampleRate);
   const echoDelay = Math.round(0.023 * sampleRate);
@@ -41,8 +53,8 @@ function channel(signal, sampleRate, { seed = 1, gain = 0.1, noise = 0.01, echo 
   return out;
 }
 
-function decodeAll(samples, cfg, seed = 7) {
-  const messages = [];
+function decodeAll(samples: Float32Array, cfg: ModemConfig, seed = 7): DecodedMessage[] {
+  const messages: DecodedMessage[] = [];
   const decoder = new Decoder(cfg, { onMessage: (m) => messages.push(m) });
   const rand = rng(seed);
   for (let i = 0; i < samples.length; ) {
@@ -53,7 +65,7 @@ function decodeAll(samples, cfg, seed = 7) {
   return messages;
 }
 
-const enc = (s) => new TextEncoder().encode(s);
+const enc = (s: string) => new TextEncoder().encode(s);
 
 test('crc8 known value', () => {
   assert.equal(crc8(enc('123456789')), 0xf4);

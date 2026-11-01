@@ -1,12 +1,22 @@
 // Forwards raw microphone samples to the main thread in batches.
+
+// The DOM lib has no AudioWorkletGlobalScope types; declare the bits used here.
+declare class AudioWorkletProcessor {
+  readonly port: MessagePort;
+}
+declare function registerProcessor(name: string, ctor: new () => AudioWorkletProcessor): void;
+
 class RecorderProcessor extends AudioWorkletProcessor {
+  private batch: Float32Array<ArrayBuffer>;
+  private filled: number;
+
   constructor() {
     super();
     this.batch = new Float32Array(2048);
     this.filled = 0;
   }
 
-  process(inputs) {
+  process(inputs: Float32Array[][]): boolean {
     const channel = inputs[0]?.[0];
     if (channel) {
       let i = 0;
@@ -26,3 +36,5 @@ class RecorderProcessor extends AudioWorkletProcessor {
 }
 
 registerProcessor('recorder', RecorderProcessor);
+
+export {};

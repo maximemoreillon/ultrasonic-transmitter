@@ -23,7 +23,7 @@ Microphone access requires a secure context, which is why the dev server uses HT
 - Mic `echoCancellation`, `noiseSuppression` and `autoGainControl` are disabled because they
   strip high frequencies.
 
-Core logic lives in `src/modem.js` (pure, DOM-free); UI in `src/app.js`.
+Core logic lives in `src/modem.ts` (pure, DOM-free); UI in `src/app.ts`.
 
 ## Practical notes
 
