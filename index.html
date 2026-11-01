@@ -4,74 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Ultrasonic Transmitter</title>
-    <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
-    <header>
-      <h1>Ultrasonic transmitter</h1>
-      <nav class="tabs" role="tablist">
-        <button role="tab" data-tab="tx" aria-selected="true">Transmit</button>
-        <button role="tab" data-tab="rx" aria-selected="false">Receive</button>
-      </nav>
-    </header>
-
-    <main>
-      <section id="tx" class="panel">
-        <label>
-          Message
-          <textarea id="tx-message" rows="3" maxlength="255">zone-42</textarea>
-        </label>
-        <p class="hint" id="tx-info"></p>
-
-        <div class="row">
-          <label>
-            Band
-            <select id="tx-profile"></select>
-          </label>
-          <label>
-            Volume <output id="tx-volume-out"></output>
-            <input id="tx-volume" type="range" min="0" max="1" step="0.01" value="0.8" />
-          </label>
-        </div>
-
-        <div class="row">
-          <label class="check"><input id="tx-repeat" type="checkbox" checked /> Repeat as beacon</label>
-          <label>
-            Gap between repeats (s)
-            <input id="tx-gap" type="number" min="0" max="10" step="0.1" value="0.5" />
-          </label>
-        </div>
-
-        <button id="tx-toggle" class="primary">Start transmitting</button>
-        <p class="status" id="tx-status">Idle</p>
-      </section>
-
-      <section id="rx" class="panel" hidden>
-        <div class="row">
-          <label>
-            Band
-            <select id="rx-profile"></select>
-          </label>
-          <label class="check"><input id="rx-show-failed" type="checkbox" /> Show failed frames</label>
-        </div>
-
-        <button id="rx-toggle" class="primary">Start listening</button>
-        <p class="status" id="rx-status">Idle</p>
-
-        <div class="viz">
-          <div class="waterfall-wrap">
-            <canvas id="rx-waterfall" width="600" height="200"></canvas>
-            <canvas id="rx-overlay" width="600" height="200"></canvas>
-          </div>
-          <div class="bars" id="rx-bars"></div>
-          <p class="hint">Spectrogram of the selected band, with tone channels marked. Bars show the energy share of each of the 16 tones.</p>
-        </div>
-
-        <h2>Received</h2>
-        <ul id="rx-log" class="log"></ul>
-      </section>
-    </main>
-
-    <script type="module" src="/src/app.ts"></script>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
